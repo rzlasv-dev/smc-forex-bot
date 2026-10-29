@@ -71,10 +71,14 @@ TWELVEDATA_API_KEY = os.getenv("TWELVEDATA_API_KEY", "").strip()
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "").strip()
 
 # ==========================================
-# 5. KONFIGURASI MULTI-PROVIDER WHATSAPP
+# 5. KONFIGURASI NOTIFIKASI TELEGRAM (UTAMA - 100% GRATIS & UNLIMITED)
 # ==========================================
-# Bot mendukung kombinasi provider sekaligus. Provider yang memiliki kredensial di .env akan aktif otomatis.
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
+TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "").strip()
 
+# ==========================================
+# 6. KONFIGURASI WHATSAPP (OPSIONAL / CADANGAN)
+# ==========================================
 # A. CallMeBot (100% Gratis untuk nomor WA pribadi)
 CALLMEBOT_PHONE = os.getenv("CALLMEBOT_PHONE", "6281233959685").strip()       # Nomor WA aktif
 CALLMEBOT_APIKEY = os.getenv("CALLMEBOT_APIKEY", "").strip()

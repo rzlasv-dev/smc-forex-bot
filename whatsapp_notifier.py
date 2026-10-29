@@ -13,6 +13,8 @@ from config import (
     RISK_PERCENT,
     RR_TP1,
     RR_TP2,
+    TELEGRAM_BOT_TOKEN,
+    TELEGRAM_CHAT_ID,
     TWILIO_ACCOUNT_SID,
     TWILIO_AUTH_TOKEN,
     TWILIO_FROM_WA,
@@ -20,19 +22,20 @@ from config import (
 )
 from smc_engine import SMCSetupSignal
 
-logger = logging.getLogger("SMC_Bot.WhatsApp")
+logger = logging.getLogger("SMC_Bot.Notifier")
 
 
 class WhatsAppMultiNotifier:
     """
-    Sistem Notifikasi WhatsApp Kombinasi (Multi-Gateway):
-    1. CallMeBot API (100% Gratis untuk nomor pribadi)
-    2. Fonnte API (Gateway WhatsApp Indonesia)
-    3. Twilio WhatsApp API (Cloud Enterprise)
-    4. Custom Webhook (WAHA / Baileys / Go-WhatsApp Self-Hosted)
-
-    Otomatis mengirim ke semua provider yang kredensialnya terisi di .env.
+    Sistem Notifikasi Utama:
+    1. TELEGRAM BOT API (Utama - 100% Gratis Selamanya, Instan, Tanpa Limit Kuota)
+       Dilengkapi fitur Auto-Detect Chat ID jika user baru mengisi TELEGRAM_BOT_TOKEN
+       dan sudah mengirim pesan '/start' ke bot Telegram-nya.
+    2. Multi-Gateway WhatsApp (Opsional/Cadangan: Fonnte, CallMeBot, Twilio, Custom Webhook)
     """
+
+    def __init__(self):
+        self.cached_tg_chat_id = TELEGRAM_CHAT_ID
 
     @staticmethod
     def format_smc_signal_message(signal: SMCSetupSignal, ai_commentary: Optional[str] = None) -> str:
@@ -65,37 +68,92 @@ class WhatsAppMultiNotifier:
 
     def send_message(self, text: str) -> bool:
         """
-        Mengirim pesan ke seluruh channel WhatsApp yang terkonfigurasi.
-        Jika belum ada satupun yang dikonfigurasi, tetap mencetak pesan lengkap di terminal log.
+        Mengirim sinyal ke Telegram (Prioritas Utama) serta gateway WhatsApp jika diisi.
         """
         sent_any = False
 
-        # 1. CallMeBot (Gratis)
+        # 1. TELEGRAM BOT (UTAMA)
+        if TELEGRAM_BOT_TOKEN:
+            if self._send_telegram(text):
+                sent_any = True
+
+        # 2. CallMeBot WA (Opsional)
         if CALLMEBOT_PHONE and CALLMEBOT_APIKEY:
             if self._send_callmebot(text):
                 sent_any = True
 
-        # 2. Fonnte (Gateway WA Indonesia)
+        # 3. Fonnte WA (Opsional)
         if FONNTE_TOKEN and FONNTE_TARGET:
             if self._send_fonnte(text):
                 sent_any = True
 
-        # 3. Twilio WhatsApp
+        # 4. Twilio WA (Opsional)
         if TWILIO_ACCOUNT_SID and TWILIO_AUTH_TOKEN and TWILIO_TO_WA:
             if self._send_twilio(text):
                 sent_any = True
 
-        # 4. Custom Webhook (WAHA / Self-hosted)
+        # 5. Custom Webhook WA (Opsional)
         if CUSTOM_WA_WEBHOOK_URL:
             if self._send_custom_webhook(text):
                 sent_any = True
 
         if not sent_any:
             logger.warning(
-                "Belum ada kredensial WhatsApp yang diisi di .env. "
-                "Menampilkan pratinjau pesan WhatsApp di konsol:\n" + "=" * 50 + f"\n{text}\n" + "=" * 50
+                "Belum ada TELEGRAM_BOT_TOKEN yang diisi di .env. "
+                "Menampilkan pratinjau pesan sinyal di konsol:\n" + "=" * 50 + f"\n{text}\n" + "=" * 50
             )
         return sent_any
+
+    def _resolve_telegram_chat_id(self) -> Optional[str]:
+        """Jika TELEGRAM_CHAT_ID belum diisi, otomatis ambil dari user terakhir yang chat /start ke bot."""
+        if self.cached_tg_chat_id:
+            return self.cached_tg_chat_id
+        try:
+            url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/getUpdates"
+            resp = requests.get(url, timeout=10)
+            data = resp.json()
+            if data.get("ok") and data.get("result"):
+                for update in reversed(data["result"]):
+                    msg = update.get("message") or update.get("channel_post")
+                    if msg and "chat" in msg and "id" in msg["chat"]:
+                        self.cached_tg_chat_id = str(msg["chat"]["id"])
+                        logger.info(f"Auto-detected Telegram Chat ID: {self.cached_tg_chat_id}")
+                        return self.cached_tg_chat_id
+        except Exception as e:
+            logger.warning(f"Gagal auto-detect Telegram Chat ID: {e}")
+        return None
+
+    def _send_telegram(self, text: str) -> bool:
+        chat_id = self._resolve_telegram_chat_id()
+        if not chat_id:
+            logger.error(
+                "TELEGRAM_CHAT_ID belum ditemukan! Silakan buka bot Telegram kamu dan klik Start (/start), "
+                "atau isi TELEGRAM_CHAT_ID di Environment Variables."
+            )
+            return False
+
+        try:
+            url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+            payload = {
+                "chat_id": chat_id,
+                "text": text,
+                "parse_mode": "Markdown",
+                "disable_web_page_preview": True,
+            }
+            resp = requests.post(url, json=payload, timeout=15)
+            if resp.status_code == 200 and resp.json().get("ok"):
+                logger.info(f"✅ Notifikasi Sinyal SMC berhasil dikirim ke Telegram (Chat ID: {chat_id}).")
+                return True
+            # Fallback tanpa parse_mode jika ada karakter khusus pada teks AI
+            payload.pop("parse_mode", None)
+            resp_fallback = requests.post(url, json=payload, timeout=15)
+            if resp_fallback.status_code == 200:
+                logger.info(f"✅ Notifikasi Sinyal SMC berhasil dikirim ke Telegram (Plain mode).")
+                return True
+            logger.error(f"Telegram gagal ({resp.status_code}): {resp.text}")
+        except Exception as e:
+            logger.error(f"Telegram exception: {e}")
+        return False
 
     def _send_callmebot(self, text: str) -> bool:
         try:
