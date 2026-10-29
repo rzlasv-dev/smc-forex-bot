@@ -1,0 +1,33 @@
+services:
+  - type: web
+    name: smc-forex-scanner-bot
+    runtime: python
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: python main.py
+    healthCheckPath: /health
+    envVars:
+      - key: ACCOUNT_BALANCE
+        value: "1000.0"
+      - key: RISK_PERCENT
+        value: "1.0"
+      - key: RR_TP1
+        value: "2.0"
+      - key: RR_TP2
+        value: "3.5"
+      - key: COOLDOWN_MINUTES
+        value: "60"
+      - key: ONLY_ACTIVE_SESSIONS
+        value: "false"
+      - key: CALLMEBOT_PHONE
+        sync: false
+      - key: CALLMEBOT_APIKEY
+        sync: false
+      - key: FONNTE_TOKEN
+        sync: false
+      - key: FONNTE_TARGET
+        sync: false
+      - key: GEMINI_API_KEY
+        sync: false
+      - key: TWELVEDATA_API_KEY
+        sync: false

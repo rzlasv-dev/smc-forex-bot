@@ -1,0 +1,9 @@
+services:
+  smc-forex-bot:
+    build: .
+    container_name: smc-forex-bot
+    restart: always
+    env_file:
+      - .env
+    volumes:
+      - ./state_cooldown.json:/app/state_cooldown.json
