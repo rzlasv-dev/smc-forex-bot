@@ -174,6 +174,7 @@ class RenderHealthCheckHandler(BaseHTTPRequestHandler):
     HTTP Server ringan khusus untuk Render.com Web Service (Free Tier):
     - GET / atau /status : Menampilkan JSON status analisa terakhir (XAUUSD, XAGUSD, EURUSD)
     - GET /health        : Endpoint ping untuk UptimeRobot / Cron-job.org agar bot aktif 24 jam penuh
+    - GET /test-notif    : Mengirim sinyal tes SMC ke WhatsApp langsung dari browser
     """
 
     def do_GET(self):
@@ -183,6 +184,20 @@ class RenderHealthCheckHandler(BaseHTTPRequestHandler):
             self.end_headers()
             response_body = json.dumps(BOT_STATUS, indent=2, ensure_ascii=False)
             self.wfile.write(response_body.encode("utf-8"))
+        elif self.path == "/test-notif":
+            send_test_notification(InstitutionalAIAnalyst(), WhatsAppMultiNotifier())
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.end_headers()
+            self.wfile.write(
+                json.dumps(
+                    {
+                        "status": "sent",
+                        "message": "Pesan tes sinyal SMC telah dikirim ke gateway WhatsApp (081233959685).",
+                    },
+                    indent=2,
+                ).encode("utf-8")
+            )
         else:
             self.send_response(404)
             self.end_headers()

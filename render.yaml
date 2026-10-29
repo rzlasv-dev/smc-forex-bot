@@ -20,13 +20,13 @@ services:
       - key: ONLY_ACTIVE_SESSIONS
         value: "false"
       - key: CALLMEBOT_PHONE
-        sync: false
+        value: "6281233959685"
       - key: CALLMEBOT_APIKEY
         sync: false
       - key: FONNTE_TOKEN
         sync: false
       - key: FONNTE_TARGET
-        sync: false
+        value: "081233959685"
       - key: GEMINI_API_KEY
         sync: false
       - key: TWELVEDATA_API_KEY

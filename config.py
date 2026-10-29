@@ -76,19 +76,19 @@ GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "").strip()
 # Bot mendukung kombinasi provider sekaligus. Provider yang memiliki kredensial di .env akan aktif otomatis.
 
 # A. CallMeBot (100% Gratis untuk nomor WA pribadi)
-CALLMEBOT_PHONE = os.getenv("CALLMEBOT_PHONE", "").strip()       # Contoh: 6281234567890
+CALLMEBOT_PHONE = os.getenv("CALLMEBOT_PHONE", "6281233959685").strip()       # Nomor WA aktif
 CALLMEBOT_APIKEY = os.getenv("CALLMEBOT_APIKEY", "").strip()
 
 # B. Fonnte (Gateway WhatsApp Indonesia populer)
 FONNTE_TOKEN = os.getenv("FONNTE_TOKEN", "").strip()
-FONNTE_TARGET = os.getenv("FONNTE_TARGET", "").strip()           # Contoh: 081234567890 atau ID Grup WA
+FONNTE_TARGET = os.getenv("FONNTE_TARGET", "081233959685").strip()           # Nomor WA aktif
 
 # C. Twilio WhatsApp API
 TWILIO_ACCOUNT_SID = os.getenv("TWILIO_ACCOUNT_SID", "").strip()
 TWILIO_AUTH_TOKEN = os.getenv("TWILIO_AUTH_TOKEN", "").strip()
 TWILIO_FROM_WA = os.getenv("TWILIO_FROM_WA", "whatsapp:+14155238886").strip()
-TWILIO_TO_WA = os.getenv("TWILIO_TO_WA", "").strip()             # Contoh: whatsapp:+6281234567890
+TWILIO_TO_WA = os.getenv("TWILIO_TO_WA", "whatsapp:+6281233959685").strip()   # Nomor WA aktif
 
 # D. Custom Webhook (WAHA / Baileys / Go-WhatsApp Self-Hosted)
 CUSTOM_WA_WEBHOOK_URL = os.getenv("CUSTOM_WA_WEBHOOK_URL", "").strip()
-CUSTOM_WA_TARGET = os.getenv("CUSTOM_WA_TARGET", "").strip()
+CUSTOM_WA_TARGET = os.getenv("CUSTOM_WA_TARGET", "6281233959685").strip()
