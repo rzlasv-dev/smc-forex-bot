@@ -25,7 +25,6 @@ class SMCSetupSignal:
     m15_poi_zone: Tuple[float, float]
     m5_trigger: str               # Contoh: "M5 Bullish CHoCH + Displacement FVG (RSI Ideal)"
     entry_price: float            # Harga Market Execution (Candle Close M5)
-    limit_entry_price: float      # Harga Optimal Limit Entry (50% FVG / OTE Retracement)
     stop_loss: float
     tp1: float
     tp2: float
@@ -33,6 +32,7 @@ class SMCSetupSignal:
     recommended_lot: float
     risk_usd: float
     timestamp: str
+    limit_entry_price: float = 0.0  # Harga Optimal Limit Entry (50% FVG / OTE Retracement)
 
 
 class SMCEngine:
