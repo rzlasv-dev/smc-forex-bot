@@ -1,250 +1,276 @@
-import argparse
-from datetime import datetime, timedelta, timezone
-from http.server import BaseHTTPRequestHandler, HTTPServer
-import json
-import logging
 import os
-import threading
-import time
-from typing import Dict
-from ai_analyst import InstitutionalAIAnalyst
-from config import (
-    ACTIVE_END_HOUR_UTC,
-    ACTIVE_START_HOUR_UTC,
-    COOLDOWN_MINUTES,
-    ONLY_ACTIVE_SESSIONS,
-    PAIRS_CONFIG,
-)
-from data_feed import MarketDataFeed
-from smc_engine import SMCEngine
-from whatsapp_notifier import WhatsAppMultiNotifier
+import sys
+import requests
+import pandas as pd
+import numpy as np
+import yfinance as yf
+from datetime import datetime, timezone
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s | %(levelname)-7s | %(name)s | %(message)s",
-    datefmt="%Y-%m-%d %H:%M:%S",
-)
-logger = logging.getLogger("SMC_Bot.Main")
+# ==========================================
+# KONFIGURASI TELEGRAM & MARKET
+# ==========================================
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
+TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "").strip()
+SEND_STATUS_IF_NO_SETUP = os.getenv("SEND_STATUS_IF_NO_SETUP", "false").lower() == "true"
 
-COOLDOWN_FILE = os.path.join(os.path.dirname(__file__), "state_cooldown.json")
-
-BOT_STATUS = {
-    "service": "SMC Forex & Metals 24/7 Scanner Bot",
-    "started_at_utc": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC"),
-    "last_scan_utc": None,
-    "market_open": True,
-    "pairs_diagnostics": {},
+PAIRS = {
+    "XAUUSD (GOLD)": {"ticker": "GC=F", "pip_value": 0.1, "decimals": 2},
+    "EURUSD": {"ticker": "EURUSD=X", "pip_value": 0.0001, "decimals": 5},
+    "GBPUSD": {"ticker": "GBPUSD=X", "pip_value": 0.0001, "decimals": 5},
+    "USDJPY": {"ticker": "USDJPY=X", "pip_value": 0.01, "decimals": 3},
+    "AUDUSD": {"ticker": "AUDUSD=X", "pip_value": 0.0001, "decimals": 5},
 }
 
 
-class CooldownManager:
-    """Mencegah pengiriman sinyal berulang (spam) pada pair & arah yang sama dalam masa cooldown."""
-
-    def __init__(self, filepath: str = COOLDOWN_FILE):
-        self.filepath = filepath
-        self.state: Dict[str, str] = self._load()
-
-    def _load(self) -> Dict[str, str]:
-        if os.path.exists(self.filepath):
-            try:
-                with open(self.filepath, "r", encoding="utf-8") as f:
-                    return json.load(f)
-            except Exception:
-                return {}
-        return {}
-
-    def _save(self) -> None:
-        try:
-            with open(self.filepath, "w", encoding="utf-8") as f:
-                json.dump(self.state, f, indent=2)
-        except Exception as e:
-            logger.warning(f"Gagal menyimpan state cooldown: {e}")
-
-    def is_on_cooldown(self, pair: str, direction: str) -> bool:
-        key = f"{pair}_{direction}"
-        last_sent_str = self.state.get(key)
-        if not last_sent_str:
-            return False
-        try:
-            last_sent = datetime.fromisoformat(last_sent_str)
-            now_utc = datetime.now(timezone.utc)
-            return (now_utc - last_sent) < timedelta(minutes=COOLDOWN_MINUTES)
-        except Exception:
-            return False
-
-    def mark_sent(self, pair: str, direction: str) -> None:
-        key = f"{pair}_{direction}"
-        self.state[key] = datetime.now(timezone.utc).isoformat()
-        self._save()
-
-
-def is_market_open_and_active_session() -> bool:
-    now_utc = datetime.now(timezone.utc)
-    if now_utc.weekday() == 5:  # Sabtu
-        return False
-    if now_utc.weekday() == 6 and now_utc.hour < 21:  # Minggu siang
+def send_telegram_message(text: str) -> bool:
+    """Mengirim pesan ke Telegram menggunakan format HTML."""
+    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
+        print("[ERROR] TELEGRAM_BOT_TOKEN atau TELEGRAM_CHAT_ID belum diset!")
         return False
 
-    if ONLY_ACTIVE_SESSIONS:
-        return ACTIVE_START_HOUR_UTC <= now_utc.hour < ACTIVE_END_HOUR_UTC
-    return True
+    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+    payload = {
+        "chat_id": TELEGRAM_CHAT_ID,
+        "text": text,
+        "parse_mode": "HTML",
+        "disable_web_page_preview": True,
+    }
 
-
-def run_scan_cycle(
-    feed: MarketDataFeed,
-    engine: SMCEngine,
-    ai_analyst: InstitutionalAIAnalyst,
-    notifier: WhatsAppMultiNotifier,
-    cooldown: CooldownManager,
-    send_live_report: bool = False,
-) -> None:
-    logger.info("Memulai siklus scan Strict MTF SMC (H1 -> M15 -> M5) untuk: " + ", ".join(PAIRS_CONFIG.keys()))
-    now_str = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
-    BOT_STATUS["last_scan_utc"] = now_str
-
-    all_diagnostics: Dict[str, Dict] = {}
-
-    for pair in PAIRS_CONFIG:
-        mtf_data = feed.fetch_mtf_data(pair)
-        if not mtf_data:
-            logger.warning(f"[{pair}] Data MTF tidak tersedia pada siklus ini, lanjut ke pair berikutnya.")
-            continue
-
-        signal, diag = engine.scan_pair(pair, mtf_data)
-        BOT_STATUS["pairs_diagnostics"][pair] = diag
-        all_diagnostics[pair] = diag
-
-        logger.info(
-            f"[{pair}] Spot Price: {diag['price']} | H1: {diag['h1_bias']} ({diag['h1_zone']}) | "
-            f"M15 POI Active: {diag['m15_active']} ({diag['m15_poi']}) | "
-            f"M5 Triggered: {diag['m5_triggered']} ({diag['m5_trigger']})"
-        )
-
-        if signal is not None:
-            if cooldown.is_on_cooldown(signal.pair, signal.direction):
-                logger.info(f"[{pair}] Setup {signal.direction} terdeteksi namun masih dalam masa Cooldown.")
-                continue
-
-            ai_comment = ai_analyst.generate_commentary(signal)
-            msg = notifier.format_smc_signal_message(signal, ai_commentary=ai_comment)
-            notifier.send_message(msg)
-            cooldown.mark_sent(signal.pair, signal.direction)
-
-    # Jika dipicu manual (--test-notif / tombol Run workflow di GitHub), kirimkan Laporan Market Real-Time (bukan angka dummy!)
-    if send_live_report and all_diagnostics:
-        report_msg = notifier.format_live_market_report(all_diagnostics, now_str)
-        notifier.send_message(report_msg)
-
-
-def sleep_until_next_m5_close() -> None:
-    """Menunggu hingga tepat 5 detik setelah penutupan candle M5 berikutnya (:00, :05, :10, dst)."""
-    now = datetime.now(timezone.utc)
-    minutes_to_next_m5 = 5 - (now.minute % 5)
-    next_run = (now + timedelta(minutes=minutes_to_next_m5)).replace(second=5, microsecond=0)
-    sleep_sec = max(5.0, (next_run - now).total_seconds())
-    logger.info(
-        f"Siklus selesai. Menunggu {int(sleep_sec)} detik hingga M5 Candle Close berikutnya "
-        f"({next_run.strftime('%H:%M:%S UTC')})..."
-    )
-    time.sleep(sleep_sec)
-
-
-class RenderHealthCheckHandler(BaseHTTPRequestHandler):
-    def do_GET(self):
-        if self.path in ("/", "/status", "/health"):
-            self.send_response(200)
-            self.send_header("Content-Type", "application/json; charset=utf-8")
-            self.end_headers()
-            response_body = json.dumps(BOT_STATUS, indent=2, ensure_ascii=False)
-            self.wfile.write(response_body.encode("utf-8"))
-        elif self.path == "/test-notif":
-            run_scan_cycle(
-                MarketDataFeed(),
-                SMCEngine(),
-                InstitutionalAIAnalyst(),
-                WhatsAppMultiNotifier(),
-                CooldownManager(),
-                send_live_report=True,
-            )
-            self.send_response(200)
-            self.send_header("Content-Type", "application/json; charset=utf-8")
-            self.end_headers()
-            self.wfile.write(
-                json.dumps(
-                    {
-                        "status": "sent",
-                        "message": "Laporan analisa market Real-Time Spot telah dikirim ke Telegram.",
-                    },
-                    indent=2,
-                ).encode("utf-8")
-            )
+    try:
+        response = requests.post(url, json=payload, timeout=15)
+        if response.status_code == 200:
+            print("[SUCCESS] Sinyal MTF berhasil dikirim ke Telegram.")
+            return True
         else:
-            self.send_response(404)
-            self.end_headers()
+            print(f"[ERROR] Gagal kirim ke Telegram ({response.status_code}): {response.text}")
+            return False
+    except Exception as e:
+        print(f"[EXCEPTION] Error saat menghubungi Telegram API: {e}")
+        return False
 
-    def log_message(self, format, *args):
-        return
+
+def fetch_market_data(ticker: str, period: str, interval: str) -> pd.DataFrame:
+    """Mengambil data OHLC real-time dengan penanganan MultiIndex yfinance."""
+    try:
+        df = yf.download(ticker, period=period, interval=interval, progress=False, auto_adjust=True)
+        if df is None or df.empty:
+            return pd.DataFrame()
+
+        if isinstance(df.columns, pd.MultiIndex):
+            df.columns = df.columns.get_level_values(0)
+
+        df = df[["Open", "High", "Low", "Close", "Volume"]].dropna()
+
+        # Buang candle terakhir yang sedang berjalan untuk menghindari repaint
+        if len(df) > 2:
+            df = df.iloc[:-1].copy()
+
+        return df
+    except Exception as e:
+        print(f"[ERROR] Gagal mengambil data {ticker} ({interval}): {e}")
+        return pd.DataFrame()
 
 
-def start_render_http_server() -> None:
-    port = int(os.getenv("PORT", "10000"))
-    server = HTTPServer(("0.0.0.0", port), RenderHealthCheckHandler)
-    logger.info(f"🌐 HTTP Health & Status Server aktif di port {port}")
-    server.serve_forever()
+def calculate_indicators(df: pd.DataFrame) -> pd.DataFrame:
+    """Menghitung EMA 50, ATR 14, dan Swing High/Low."""
+    df = df.copy()
+    df["EMA50"] = df["Close"].ewm(span=50, adjust=False).mean()
+
+    high_low = df["High"] - df["Low"]
+    high_close = (df["High"] - df["Close"].shift()).abs()
+    low_close = (df["Low"] - df["Close"].shift()).abs()
+    tr = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1)
+    df["ATR"] = tr.rolling(window=14).mean()
+
+    # Swing High & Swing Low (fractal 5 candle)
+    df["Swing_High"] = df["High"][
+        (df["High"].shift(2) < df["High"]) &
+        (df["High"].shift(1) < df["High"]) &
+        (df["High"].shift(-1) < df["High"]) &
+        (df["High"].shift(-2) < df["High"])
+    ]
+    df["Swing_Low"] = df["Low"][
+        (df["Low"].shift(2) > df["Low"]) &
+        (df["Low"].shift(1) > df["Low"]) &
+        (df["Low"].shift(-1) > df["Low"]) &
+        (df["Low"].shift(-2) > df["Low"])
+    ]
+    return df
+
+
+def analyze_multitimeframe_setup(pair_name: str, meta: dict):
+    """
+    Analisis Multi-Timeframe:
+    - H1: Menentukan Tren Makro & Struktur Utama (Bullish / Bearish Bias)
+    - M15: Mencari Konfirmasi Eksekusi (BOS, FVG, Order Block) searah H1
+    """
+    # 1. Tarik Data H1 (Macro Context) & M15 (Execution Context)
+    df_h1 = fetch_market_data(meta["ticker"], period="30d", interval="1h")
+    df_m15 = fetch_market_data(meta["ticker"], period="7d", interval="15m")
+
+    if len(df_h1) < 50 or len(df_m15) < 50:
+        return None
+
+    df_h1 = calculate_indicators(df_h1)
+    df_m15 = calculate_indicators(df_m15)
+
+    # --- ANALISIS H1 (BIAS & STRUKTUR) ---
+    h1_close = float(df_h1["Close"].iloc[-1])
+    h1_ema = float(df_h1["EMA50"].iloc[-1])
+    h1_swings_high = df_h1["Swing_High"].dropna()
+    h1_swings_low = df_h1["Swing_Low"].dropna()
+
+    if len(h1_swings_high) < 2 or len(h1_swings_low) < 2:
+        return None
+
+    h1_last_sh = float(h1_swings_high.iloc[-1])
+    h1_last_sl = float(h1_swings_low.iloc[-1])
+
+    # Tentukan Market Structure H1
+    h1_bullish_structure = h1_close > h1_ema and h1_close > h1_last_sl
+    h1_bearish_structure = h1_close < h1_ema and h1_close < h1_last_sh
+
+    # --- ANALISIS M15 (EKSEKUSI SETUP SMC) ---
+    m15_close = float(df_m15["Close"].iloc[-1])
+    m15_open = float(df_m15["Open"].iloc[-1])
+    m15_prev_close = float(df_m15["Close"].iloc[-2])
+    m15_ema = float(df_m15["EMA50"].iloc[-1])
+    m15_atr = float(df_m15["ATR"].iloc[-1]) if not np.isnan(df_m15["ATR"].iloc[-1]) else (m15_close * 0.001)
+
+    m15_swings_high = df_m15["Swing_High"].dropna()
+    m15_swings_low = df_m15["Swing_Low"].dropna()
+    if len(m15_swings_high) < 2 or len(m15_swings_low) < 2:
+        return None
+
+    m15_last_sh = float(m15_swings_high.iloc[-1])
+    m15_last_sl = float(m15_swings_low.iloc[-1])
+
+    # Cari Fair Value Gap (FVG) pada M15
+    m15_bullish_fvg = None
+    m15_bearish_fvg = None
+
+    for i in range(-6, -2):
+        c1_high = float(df_m15["High"].iloc[i])
+        c1_low = float(df_m15["Low"].iloc[i])
+        c3_high = float(df_m15["High"].iloc[i + 2])
+        c3_low = float(df_m15["Low"].iloc[i + 2])
+
+        if c3_low > c1_high:
+            m15_bullish_fvg = (c1_high, c3_low)
+        if c3_high < c1_low:
+            m15_bearish_fvg = (c3_high, c1_low)
+
+    m15_bullish_bos = (m15_close > m15_last_sh) and (m15_prev_close <= m15_last_sh)
+    m15_bearish_bos = (m15_close < m15_last_sl) and (m15_prev_close >= m15_last_sl)
+
+    in_bullish_fvg = m15_bullish_fvg is not None and (m15_bullish_fvg[0] <= m15_close <= m15_bullish_fvg[1] * 1.0005)
+    in_bearish_fvg = m15_bearish_fvg is not None and (m15_bearish_fvg[0] * 0.9995 <= m15_close <= m15_bearish_fvg[1])
+
+    setup = None
+
+    # ==========================================
+    # Kombinasi MTF: H1 Bullish + M15 Setup Buy
+    # ==========================================
+    if h1_bullish_structure and ((m15_bullish_bos and m15_bullish_fvg) or (in_bullish_fvg and m15_close > m15_open)):
+        order_type = "BUY NOW (Market Execution)" if in_bullish_fvg else "BUY / BUY LIMIT"
+        entry_price = m15_close
+        ob_low = float(df_m15["Low"].iloc[-6:].min())
+        sl_price = min(ob_low, entry_price - (1.5 * m15_atr)) - (0.2 * m15_atr)
+        risk = abs(entry_price - sl_price)
+
+        if risk > 0:
+            setup = {
+                "pair": pair_name,
+                "direction": "BUY",
+                "order_type": order_type,
+                "entry": entry_price,
+                "sl": sl_price,
+                "tp1": entry_price + (risk * 1.5),
+                "tp2": entry_price + (risk * 2.5),
+                "tp3": entry_price + (risk * 4.0),
+                "risk_pips": round(risk / meta["pip_value"], 1),
+                "decimals": meta["decimals"],
+                "reason": "H1 Bullish Bias + M15 Bullish BOS & Unmitigated FVG",
+            }
+
+    # ==========================================
+    # Kombinasi MTF: H1 Bearish + M15 Setup Sell
+    # ==========================================
+    elif h1_bearish_structure and ((m15_bearish_bos and m15_bearish_fvg) or (in_bearish_fvg and m15_close < m15_open)):
+        order_type = "SELL NOW (Market Execution)" if in_bearish_fvg else "SELL / SELL LIMIT"
+        entry_price = m15_close
+        ob_high = float(df_m15["High"].iloc[-6:].max())
+        sl_price = max(ob_high, entry_price + (1.5 * m15_atr)) + (0.2 * m15_atr)
+        risk = abs(sl_price - entry_price)
+
+        if risk > 0:
+            setup = {
+                "pair": pair_name,
+                "direction": "SELL",
+                "order_type": order_type,
+                "entry": entry_price,
+                "sl": sl_price,
+                "tp1": entry_price - (risk * 1.5),
+                "tp2": entry_price - (risk * 2.5),
+                "tp3": entry_price - (risk * 4.0),
+                "risk_pips": round(risk / meta["pip_value"], 1),
+                "decimals": meta["decimals"],
+                "reason": "H1 Bearish Bias + M15 Bearish BOS & Unmitigated FVG",
+            }
+
+    return setup
+
+
+def format_signal_message(setup: dict) -> str:
+    """Format pesan Telegram khusus Multi-Timeframe."""
+    d = setup["decimals"]
+    is_buy = setup["direction"] == "BUY"
+    header_icon = "🟢" if is_buy else "🔴"
+    arrow_icon = "📈" if is_buy else "📉"
+    now_wib = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+
+    return (
+        f"{header_icon} <b>MTF SMC SIGNAL: {setup['direction']} {setup['pair']}</b> {arrow_icon}\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"⚡ <b>Action:</b> <code>{setup['order_type']}</code>\n"
+        f"📊 <b>Timeframe:</b> H1 (Bias) + M15 (Execution)\n"
+        f"🎯 <b>Entry Price:</b> <code>{setup['entry']:.{d}f}</code>\n\n"
+        f"🛑 <b>Stop Loss (SL):</b> <code>{setup['sl']:.{d}f}</code> <i>(-{setup['risk_pips']} pips)</i>\n"
+        f"✅ <b>Take Profit 1 (1:1.5):</b> <code>{setup['tp1']:.{d}f}</code>\n"
+        f"✅ <b>Take Profit 2 (1:2.5):</b> <code>{setup['tp2']:.{d}f}</code>\n"
+        f"✅ <b>Take Profit 3 (1:4.0):</b> <code>{setup['tp3']:.{d}f}</code>\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"🧠 <b>Confluence Analysis:</b>\n"
+        f"• {setup['reason']}\n\n"
+        f"⚠️ <i>Disiplin Risk Management (Maks 1-2% per trade).</i>\n"
+        f"🕒 <i>Scanned at: {now_wib}</i>"
+    )
 
 
 def main():
-    parser = argparse.ArgumentParser(description="24/7 Cloud SMC Forex & Metals Scanner Bot (H1+M15+M5)")
-    parser.add_argument(
-        "--once",
-        action="store_true",
-        help="Jalankan 1 kali scan MTF sekarang juga (hanya kirim notif jika ada setup A+).",
-    )
-    parser.add_argument(
-        "--test-notif",
-        action="store_true",
-        help="Jalankan scan market Real-Time Spot sekarang juga dan kirimkan Laporan Radar SMC Live ke Telegram.",
-    )
-    args = parser.parse_args()
+    print("=== Memulai Multi-Timeframe SMC Scanner (H1 + M15) ===")
+    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
+        print("[FATAL] Secrets Telegram belum dikonfigurasi!")
+        sys.exit(1)
 
-    feed = MarketDataFeed()
-    engine = SMCEngine()
-    ai_analyst = InstitutionalAIAnalyst()
-    notifier = WhatsAppMultiNotifier()
-    cooldown = CooldownManager()
+    signals_sent = 0
 
-    if args.test_notif:
-        run_scan_cycle(feed, engine, ai_analyst, notifier, cooldown, send_live_report=True)
-        return
+    for pair_name, meta in PAIRS.items():
+        print(f"Analyzing MTF for {pair_name}...")
+        setup = analyze_multitimeframe_setup(pair_name, meta)
+        if setup:
+            msg = format_signal_message(setup)
+            if send_telegram_message(msg):
+                signals_sent += 1
 
-    if args.once:
-        run_scan_cycle(feed, engine, ai_analyst, notifier, cooldown, send_live_report=False)
-        return
+    print(f"=== Scan selesai. Total sinyal terkirim: {signals_sent} ===")
 
-    http_thread = threading.Thread(target=start_render_http_server, daemon=True)
-    http_thread.start()
-
-    logger.info("==========================================================")
-    logger.info("🚀 STRICT SMC FOREX & METALS 24/7 SCANNER BOT AKTIF")
-    logger.info("📌 Pair Prioritas : XAUUSD (Gold Spot), XAGUSD (Silver Spot), EURUSD")
-    logger.info("📐 Timeframe SMC  : H1 (Bias & Zone) + M15 (Fresh POI/Sweep) + M5 (Trigger)")
-    logger.info("==========================================================")
-
-    while True:
-        try:
-            market_active = is_market_open_and_active_session()
-            BOT_STATUS["market_open"] = market_active
-            if market_active:
-                run_scan_cycle(feed, engine, ai_analyst, notifier, cooldown, send_live_report=False)
-            else:
-                logger.info("Market sedang tutup akhir pekan atau di luar filter jam sesi aktif.")
-            sleep_until_next_m5_close()
-        except KeyboardInterrupt:
-            logger.info("Bot dihentikan secara manual oleh user.")
-            break
-        except Exception as e:
-            logger.error(f"Error tak terduga pada main loop: {e}", exc_info=True)
-            time.sleep(30)
+    if signals_sent == 0 and SEND_STATUS_IF_NO_SETUP:
+        now_utc = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+        send_telegram_message(
+            f"🔍 <b>MTF Scanner Status:</b> Market H1 & M15 telah dipindai pada <code>{now_utc}</code>.\n"
+            f"Belum ada konfluensi tren H1 dan setup M15 yang valid."
+        )
 
 
 if __name__ == "__main__":
