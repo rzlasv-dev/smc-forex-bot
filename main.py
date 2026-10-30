@@ -11,7 +11,9 @@ from datetime import datetime, timezone
 # ==========================================
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "").strip()
-SEND_STATUS_IF_NO_SETUP = os.getenv("SEND_STATUS_IF_NO_SETUP", "false").lower() == "true"
+
+# Diubah agar otomatis bernilai true (selalu kirim laporan status meskipun tidak ada setup)
+SEND_STATUS_IF_NO_SETUP = os.getenv("SEND_STATUS_IF_NO_SETUP", "true").lower() == "true"
 
 PAIRS = {
     "XAUUSD (GOLD)": {"ticker": "GC=F", "pip_value": 0.1, "decimals": 2},
@@ -39,7 +41,7 @@ def send_telegram_message(text: str) -> bool:
     try:
         response = requests.post(url, json=payload, timeout=15)
         if response.status_code == 200:
-            print("[SUCCESS] Sinyal MTF berhasil dikirim ke Telegram.")
+            print("[SUCCESS] Pesan berhasil dikirim ke Telegram.")
             return True
         else:
             print(f"[ERROR] Gagal kirim ke Telegram ({response.status_code}): {response.text}")
@@ -61,7 +63,6 @@ def fetch_market_data(ticker: str, period: str, interval: str) -> pd.DataFrame:
 
         df = df[["Open", "High", "Low", "Close", "Volume"]].dropna()
 
-        # Buang candle terakhir yang sedang berjalan untuk menghindari repaint
         if len(df) > 2:
             df = df.iloc[:-1].copy()
 
@@ -82,7 +83,6 @@ def calculate_indicators(df: pd.DataFrame) -> pd.DataFrame:
     tr = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1)
     df["ATR"] = tr.rolling(window=14).mean()
 
-    # Swing High & Swing Low (fractal 5 candle)
     df["Swing_High"] = df["High"][
         (df["High"].shift(2) < df["High"]) &
         (df["High"].shift(1) < df["High"]) &
@@ -90,7 +90,8 @@ def calculate_indicators(df: pd.DataFrame) -> pd.DataFrame:
         (df["High"].shift(-2) < df["High"])
     ]
     df["Swing_Low"] = df["Low"][
-        (df["Low"].shift(2) > df["Low"]) &
+        (df["Swing_Low"].shift(2) > df["Low"]) & if "Swing_Low" in df else
+        (df["High"].shift(2) > df["Low"]) & # Safe fallback
         (df["Low"].shift(1) > df["Low"]) &
         (df["Low"].shift(-1) > df["Low"]) &
         (df["Low"].shift(-2) > df["Low"])
@@ -99,12 +100,6 @@ def calculate_indicators(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def analyze_multitimeframe_setup(pair_name: str, meta: dict):
-    """
-    Analisis Multi-Timeframe:
-    - H1: Menentukan Tren Makro & Struktur Utama (Bullish / Bearish Bias)
-    - M15: Mencari Konfirmasi Eksekusi (BOS, FVG, Order Block) searah H1
-    """
-    # 1. Tarik Data H1 (Macro Context) & M15 (Execution Context)
     df_h1 = fetch_market_data(meta["ticker"], period="30d", interval="1h")
     df_m15 = fetch_market_data(meta["ticker"], period="7d", interval="15m")
 
@@ -114,7 +109,6 @@ def analyze_multitimeframe_setup(pair_name: str, meta: dict):
     df_h1 = calculate_indicators(df_h1)
     df_m15 = calculate_indicators(df_m15)
 
-    # --- ANALISIS H1 (BIAS & STRUKTUR) ---
     h1_close = float(df_h1["Close"].iloc[-1])
     h1_ema = float(df_h1["EMA50"].iloc[-1])
     h1_swings_high = df_h1["Swing_High"].dropna()
@@ -126,15 +120,12 @@ def analyze_multitimeframe_setup(pair_name: str, meta: dict):
     h1_last_sh = float(h1_swings_high.iloc[-1])
     h1_last_sl = float(h1_swings_low.iloc[-1])
 
-    # Tentukan Market Structure H1
     h1_bullish_structure = h1_close > h1_ema and h1_close > h1_last_sl
     h1_bearish_structure = h1_close < h1_ema and h1_close < h1_last_sh
 
-    # --- ANALISIS M15 (EKSEKUSI SETUP SMC) ---
     m15_close = float(df_m15["Close"].iloc[-1])
     m15_open = float(df_m15["Open"].iloc[-1])
     m15_prev_close = float(df_m15["Close"].iloc[-2])
-    m15_ema = float(df_m15["EMA50"].iloc[-1])
     m15_atr = float(df_m15["ATR"].iloc[-1]) if not np.isnan(df_m15["ATR"].iloc[-1]) else (m15_close * 0.001)
 
     m15_swings_high = df_m15["Swing_High"].dropna()
@@ -145,7 +136,6 @@ def analyze_multitimeframe_setup(pair_name: str, meta: dict):
     m15_last_sh = float(m15_swings_high.iloc[-1])
     m15_last_sl = float(m15_swings_low.iloc[-1])
 
-    # Cari Fair Value Gap (FVG) pada M15
     m15_bullish_fvg = None
     m15_bearish_fvg = None
 
@@ -168,9 +158,6 @@ def analyze_multitimeframe_setup(pair_name: str, meta: dict):
 
     setup = None
 
-    # ==========================================
-    # Kombinasi MTF: H1 Bullish + M15 Setup Buy
-    # ==========================================
     if h1_bullish_structure and ((m15_bullish_bos and m15_bullish_fvg) or (in_bullish_fvg and m15_close > m15_open)):
         order_type = "BUY NOW (Market Execution)" if in_bullish_fvg else "BUY / BUY LIMIT"
         entry_price = m15_close
@@ -190,12 +177,9 @@ def analyze_multitimeframe_setup(pair_name: str, meta: dict):
                 "tp3": entry_price + (risk * 4.0),
                 "risk_pips": round(risk / meta["pip_value"], 1),
                 "decimals": meta["decimals"],
-                "reason": "H1 Bullish Bias + M15 Bullish BOS & Unmitigated FVG",
+                "reason": "H1 Bullish Bias + M15 Bullish BOS & Unmitigated FVG/Order Block Zone",
             }
 
-    # ==========================================
-    # Kombinasi MTF: H1 Bearish + M15 Setup Sell
-    # ==========================================
     elif h1_bearish_structure and ((m15_bearish_bos and m15_bearish_fvg) or (in_bearish_fvg and m15_close < m15_open)):
         order_type = "SELL NOW (Market Execution)" if in_bearish_fvg else "SELL / SELL LIMIT"
         entry_price = m15_close
@@ -215,14 +199,13 @@ def analyze_multitimeframe_setup(pair_name: str, meta: dict):
                 "tp3": entry_price - (risk * 4.0),
                 "risk_pips": round(risk / meta["pip_value"], 1),
                 "decimals": meta["decimals"],
-                "reason": "H1 Bearish Bias + M15 Bearish BOS & Unmitigated FVG",
+                "reason": "H1 Bearish Bias + M15 Bearish BOS & Unmitigated FVG/Order Block Zone",
             }
 
     return setup
 
 
 def format_signal_message(setup: dict) -> str:
-    """Format pesan Telegram khusus Multi-Timeframe."""
     d = setup["decimals"]
     is_buy = setup["direction"] == "BUY"
     header_icon = "🟢" if is_buy else "🔴"
@@ -230,47 +213,51 @@ def format_signal_message(setup: dict) -> str:
     now_wib = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
 
     return (
-        f"{header_icon} <b>MTF SMC SIGNAL: {setup['direction']} {setup['pair']}</b> {arrow_icon}\n"
+        f"{header_icon} <b>SMC SETUP DIETUKIKAN: {setup['direction']} {setup['pair']}</b> {arrow_icon}\n"
         f"━━━━━━━━━━━━━━━━━━━━━━\n"
         f"⚡ <b>Action:</b> <code>{setup['order_type']}</code>\n"
-        f"📊 <b>Timeframe:</b> H1 (Bias) + M15 (Execution)\n"
-        f"🎯 <b>Entry Price:</b> <code>{setup['entry']:.{d}f}</code>\n\n"
+        f"📊 <b>Timeframe:</b> H1 Bias + M15 Execution\n"
+        f"🎯 <b>Zona Entry:</b> <code>{setup['entry']:.{d}f}</code>\n\n"
         f"🛑 <b>Stop Loss (SL):</b> <code>{setup['sl']:.{d}f}</code> <i>(-{setup['risk_pips']} pips)</i>\n"
-        f"✅ <b>Take Profit 1 (1:1.5):</b> <code>{setup['tp1']:.{d}f}</code>\n"
-        f"✅ <b>Take Profit 2 (1:2.5):</b> <code>{setup['tp2']:.{d}f}</code>\n"
-        f"✅ <b>Take Profit 3 (1:4.0):</b> <code>{setup['tp3']:.{d}f}</code>\n"
+        f"✅ <b>Take Profit 1:</b> <code>{setup['tp1']:.{d}f}</code>\n"
+        f"✅ <b>Take Profit 2:</b> <code>{setup['tp2']:.{d}f}</code>\n"
+        f"✅ <b>Take Profit 3:</b> <code>{setup['tp3']:.{d}f}</code>\n"
         f"━━━━━━━━━━━━━━━━━━━━━━\n"
-        f"🧠 <b>Confluence Analysis:</b>\n"
+        f"🧠 <b>Analisa Zona:</b>\n"
         f"• {setup['reason']}\n\n"
-        f"⚠️ <i>Disiplin Risk Management (Maks 1-2% per trade).</i>\n"
-        f"🕒 <i>Scanned at: {now_wib}</i>"
+        f"🕒 <i>Waktu Scan: {now_wib}</i>"
     )
 
 
 def main():
-    print("=== Memulai Multi-Timeframe SMC Scanner (H1 + M15) ===")
+    print("=== Memulai Multi-Timeframe SMC Scanner (H1 + M15) ==Subs ===")
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
         print("[FATAL] Secrets Telegram belum dikonfigurasi!")
         sys.exit(1)
 
-    signals_sent = 0
+    signals_found = []
 
     for pair_name, meta in PAIRS.items():
-        print(f"Analyzing MTF for {pair_name}...")
+        print(f"Menganalisis {pair_name}...")
         setup = analyze_multitimeframe_setup(pair_name, meta)
         if setup:
+            signals_found.append(setup)
             msg = format_signal_message(setup)
-            if send_telegram_message(msg):
-                signals_sent += 1
+            send_telegram_message(msg)
 
-    print(f"=== Scan selesai. Total sinyal terkirim: {signals_sent} ===")
-
-    if signals_sent == 0 and SEND_STATUS_IF_NO_SETUP:
-        now_utc = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
-        send_telegram_message(
-            f"🔍 <b>MTF Scanner Status:</b> Market H1 & M15 telah dipindai pada <code>{now_utc}</code>.\n"
-            f"Belum ada konfluensi tren H1 dan setup M15 yang valid."
+    # Jika tidak ada satupun pair yang memenuhi setup, kirim laporan "Belum ada setup"
+    if len(signals_found) == 0 and SEND_STATUS_IF_NO_SETUP:
+        now_wib = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+        no_setup_msg = (
+            f"🔍 <b>SMC MARKET SCANNER STATUS</b>\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"⏱ <i>Waktu Scan:</i> <code>{now_wib}</code>\n\n"
+            f"ℹ️ <b>Belum ada setup</b> yang valid atau konfluensi FVG/BOS pada pair yang dipindai saat ini.\n"
+            f"Bot akan kembali memindai pada siklus 15 menit berikutnya."
         )
+        send_telegram_message(no_setup_msg)
+
+    print(f"=== Scan selesai. Sinyal ditemukan: {len(signals_found)} ===")
 
 
 if __name__ == "__main__":
