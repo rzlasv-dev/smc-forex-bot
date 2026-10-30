@@ -1,5 +1,5 @@
 import logging
-from typing import Optional
+from typing import Dict, Optional
 import urllib.parse
 import requests
 from config import (
@@ -51,8 +51,9 @@ class WhatsAppMultiNotifier:
             f"• *H1 Dealing Zone:* {signal.h1_zone}\n"
             f"• *M15 POI:* {signal.m15_poi_type} ({signal.m15_poi_zone[0]} - {signal.m15_poi_zone[1]})\n"
             f"• *M5 Trigger:* {signal.m5_trigger}\n\n"
-            f"⚡ *Execution Plan:*\n"
-            f"• *Entry Area:* `{signal.entry_price}`\n"
+            f"⚡ *Execution Plan (Spot Price):*\n"
+            f"• *Instant Entry (Close M5):* `{signal.entry_price}`\n"
+            f"• *Optimal Limit (OTE 50%):* `{signal.limit_entry_price}`\n"
             f"• *Stop Loss (SL):* `{signal.stop_loss}` _({signal.sl_pips} pips)_\n"
             f"• *Take Profit 1 (1:{RR_TP1}):* `{signal.tp1}` _(Partial 50% + SL to BEP)_\n"
             f"• *Take Profit 2 (1:{RR_TP2}/HTF):* `{signal.tp2}`\n\n"
@@ -65,6 +66,38 @@ class WhatsAppMultiNotifier:
             msg += f"\n\n🧠 *Catatan AI Institutional Analyst:*\n_{ai_commentary}_"
 
         return msg
+
+    @staticmethod
+    def format_live_market_report(diagnostics_map: Dict[str, Dict], timestamp_str: str) -> str:
+        """
+        Format laporan analisa market live (Real-Time Spot) untuk XAUUSD, XAGUSD, dan EURUSD
+        saat user melakukan tes manual, bukan angka dummy/palsu.
+        """
+        lines = [
+            "📊 *LIVE SMC MARKET RADAR (REAL-TIME SPOT)*",
+            f"🕒 *Waktu Scan:* {timestamp_str}",
+            "━━━━━━━━━━━━━━━━━━",
+        ]
+        for pair, d in diagnostics_map.items():
+            bias_icon = "🟢 BULLISH" if d["h1_bias"] == "BULLISH" else ("🔴 BEARISH" if d["h1_bias"] == "BEARISH" else "⚪ NEUTRAL")
+            poi_status = "✅ *AKTIF di Zona POI*" if d["m15_active"] else "⏳ _Menunggu Harga Masuk Zona POI_"
+            m5_status = "🔥 *TERKONFIRMASI*" if d["m5_triggered"] else "⏳ _Menunggu Trigger CHoCH/Displacement_"
+            lines.append(
+                f"\n🔹 *{pair}* — Spot Price: `{d['price']}`\n"
+                f"• *H1 Bias:* {bias_icon} | {d['h1_structure']}\n"
+                f"• *H1 Position:* {d['h1_zone']}\n"
+                f"• *M15 POI:* {poi_status}\n"
+                f"  _({d['m15_poi']})_\n"
+                f"• *M5 Trigger:* {m5_status}\n"
+                f"  _({d['m5_trigger']})_"
+            )
+
+        lines.append(
+            "\n━━━━━━━━━━━━━━━━━━\n"
+            "🤖 _Bot memantau otomatis 24/5 dan hanya mengirim sinyal ENTRY (BUY/SELL) "
+            "saat H1 + M15 + M5 semuanya terkonfirmasi ✅_"
+        )
+        return "\n".join(lines)
 
     def send_message(self, text: str) -> bool:
         """
@@ -142,13 +175,12 @@ class WhatsAppMultiNotifier:
             }
             resp = requests.post(url, json=payload, timeout=15)
             if resp.status_code == 200 and resp.json().get("ok"):
-                logger.info(f"✅ Notifikasi Sinyal SMC berhasil dikirim ke Telegram (Chat ID: {chat_id}).")
+                logger.info(f"✅ Notifikasi berhasil dikirim ke Telegram (Chat ID: {chat_id}).")
                 return True
-            # Fallback tanpa parse_mode jika ada karakter khusus pada teks AI
             payload.pop("parse_mode", None)
             resp_fallback = requests.post(url, json=payload, timeout=15)
             if resp_fallback.status_code == 200:
-                logger.info(f"✅ Notifikasi Sinyal SMC berhasil dikirim ke Telegram (Plain mode).")
+                logger.info("✅ Notifikasi berhasil dikirim ke Telegram (Plain mode).")
                 return True
             logger.error(f"Telegram gagal ({resp.status_code}): {resp.text}")
         except Exception as e:
