@@ -2,7 +2,7 @@ name: 24-7 SMC Forex & Metals Scanner Bot
 
 on:
   schedule:
-    - cron: '*/15 * * * 1-5'
+    - cron: "*/15 * * * *"
   workflow_dispatch:
     inputs:
       send_status:
